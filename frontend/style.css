@@ -1,0 +1,76 @@
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    line-height: 1.6;
+    color: #333;
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 20px;
+    background-color: #f4f4f4;
+}
+
+.container {
+    background: #fff;
+    padding: 40px;
+    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+}
+
+header {
+    text-align: center;
+    border-bottom: 2px solid #333;
+    margin-bottom: 20px;
+    padding-bottom: 10px;
+}
+
+header h1 {
+    margin: 0;
+    font-size: 2.5em;
+}
+
+#visitor-counter {
+    margin-top: 10px;
+    font-weight: bold;
+    color: #555;
+}
+
+h2 {
+    border-bottom: 1px solid #ccc;
+    padding-bottom: 5px;
+    margin-top: 30px;
+    color: #444;
+}
+
+.job, .edu {
+    margin-bottom: 20px;
+}
+
+.job h3, .edu h3 {
+    margin: 0;
+}
+
+.date {
+    font-style: italic;
+    color: #777;
+    float: right;
+}
+
+.role {
+    font-weight: bold;
+    margin: 5px 0;
+}
+
+ul {
+    margin: 10px 0;
+    padding-left: 20px;
+}
+
+li {
+    margin-bottom: 5px;
+}
+
+@media (max-width: 600px) {
+    .date {
+        float: none;
+        display: block;
+        margin-bottom: 5px;
+    }
+}
