@@ -83,7 +83,7 @@ resource "aws_lambda_function" "visitor_counter" {
   function_name    = "visitor_counter"
   role             = aws_iam_role.lambda_role.arn
   handler          = "func.lambda_handler"
-  runtime          = "python3.9"
+  runtime          = "python3.12"
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
 
   environment {
