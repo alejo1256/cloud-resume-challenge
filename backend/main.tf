@@ -124,6 +124,13 @@ data "archive_file" "stream_zip" {
   output_path = "${path.module}/lambda/stream_processor.zip"
 }
 
+# Archive Original Lambda Code
+data "archive_file" "lambda_zip" {
+  type        = "zip"
+  source_file = "${path.module}/lambda/func.py"
+  output_path = "${path.module}/lambda/func.zip"
+}
+
 # Connection Handler Lambda
 resource "aws_lambda_function" "connection_handler" {
   filename         = data.archive_file.connection_zip.output_path
