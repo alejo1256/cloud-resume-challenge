@@ -18,14 +18,28 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# DynamoDB Table
+# DynamoDB Table for Visitor Count
 resource "aws_dynamodb_table" "visitor_count" {
-  name         = "cloud-resume-stats"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "id"
+  name             = "cloud-resume-stats"
+  billing_mode     = "PAY_PER_REQUEST"
+  hash_key         = "id"
+  stream_enabled   = true
+  stream_view_type = "NEW_IMAGE"
 
   attribute {
     name = "id"
+    type = "S"
+  }
+}
+
+# DynamoDB Table for WebSocket Connections
+resource "aws_dynamodb_table" "connections" {
+  name         = "cloud-resume-connections"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "connectionId"
+
+  attribute {
+    name = "connectionId"
     type = "S"
   }
 }
@@ -48,7 +62,7 @@ resource "aws_iam_role" "lambda_role" {
   })
 }
 
-# Policy for Lambda to access DynamoDB
+# Policy for Lambda to access DynamoDB and WebSockets
 resource "aws_iam_role_policy" "lambda_dynamodb_policy" {
   name = "lambda_dynamodb_policy"
   role = aws_iam_role.lambda_role.id
@@ -59,10 +73,29 @@ resource "aws_iam_role_policy" "lambda_dynamodb_policy" {
       {
         Action = [
           "dynamodb:UpdateItem",
-          "dynamodb:GetItem"
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Scan",
+          "dynamodb:Query",
+          "dynamodb:DescribeStream",
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator",
+          "dynamodb:ListStreams"
         ]
         Effect   = "Allow"
-        Resource = aws_dynamodb_table.visitor_count.arn
+        Resource = [
+          aws_dynamodb_table.visitor_count.arn,
+          "${aws_dynamodb_table.visitor_count.arn}/stream/*",
+          aws_dynamodb_table.connections.arn
+        ]
+      },
+      {
+        Action = [
+          "execute-api:ManageConnections"
+        ]
+        Effect   = "Allow"
+        Resource = ["${aws_apigatewayv2_api.websocket_api.execution_arn}/*"]
       },
       {
         Action = [
@@ -77,14 +110,62 @@ resource "aws_iam_role_policy" "lambda_dynamodb_policy" {
   })
 }
 
-# Archive Lambda Code
-data "archive_file" "lambda_zip" {
+# Archive Connection Handler Lambda Code
+data "archive_file" "connection_zip" {
   type        = "zip"
-  source_file = "${path.module}/lambda/func.py"
-  output_path = "${path.module}/lambda/func.zip"
+  source_file = "${path.module}/lambda/connection_handler.py"
+  output_path = "${path.module}/lambda/connection_handler.zip"
 }
 
-# Lambda Function
+# Archive Stream Processor Lambda Code
+data "archive_file" "stream_zip" {
+  type        = "zip"
+  source_file = "${path.module}/lambda/stream_processor.py"
+  output_path = "${path.module}/lambda/stream_processor.zip"
+}
+
+# Connection Handler Lambda
+resource "aws_lambda_function" "connection_handler" {
+  filename         = data.archive_file.connection_zip.output_path
+  function_name    = "connection_handler"
+  role             = aws_iam_role.lambda_role.arn
+  handler          = "connection_handler.lambda_handler"
+  runtime          = "python3.12"
+  source_code_hash = data.archive_file.connection_zip.output_base64sha256
+
+  environment {
+    variables = {
+      CONNECTIONS_TABLE = aws_dynamodb_table.connections.name
+      STATS_TABLE       = aws_dynamodb_table.visitor_count.name
+    }
+  }
+}
+
+# Stream Processor Lambda
+resource "aws_lambda_function" "stream_processor" {
+  filename         = data.archive_file.stream_zip.output_path
+  function_name    = "stream_processor"
+  role             = aws_iam_role.lambda_role.arn
+  handler          = "stream_processor.lambda_handler"
+  runtime          = "python3.12"
+  source_code_hash = data.archive_file.stream_zip.output_base64sha256
+
+  environment {
+    variables = {
+      CONNECTIONS_TABLE = aws_dynamodb_table.connections.name
+      WEBSOCKET_API_URL = "${aws_apigatewayv2_stage.websocket_stage.invoke_url}"
+    }
+  }
+}
+
+# DynamoDB Stream Trigger for Stream Processor
+resource "aws_lambda_event_source_mapping" "stream_trigger" {
+  event_source_arn  = aws_dynamodb_table.visitor_count.stream_arn
+  function_name     = aws_lambda_function.stream_processor.arn
+  starting_position = "LATEST"
+}
+
+# Original Lambda Function (REST API)
 resource "aws_lambda_function" "visitor_counter" {
   filename         = data.archive_file.lambda_zip.output_path
   function_name    = "visitor_counter"
@@ -101,7 +182,7 @@ resource "aws_lambda_function" "visitor_counter" {
   }
 }
 
-# Lambda Permission for API Gateway
+# Lambda Permission for REST API
 resource "aws_lambda_permission" "apigw_lambda" {
   statement_id  = "AllowExecutionFromAPIGateway"
   action        = "lambda:InvokeFunction"
@@ -110,7 +191,7 @@ resource "aws_lambda_permission" "apigw_lambda" {
   source_arn    = "${aws_api_gateway_rest_api.visitor_api.execution_arn}/*/*"
 }
 
-# API Gateway
+# REST API Gateway
 resource "aws_api_gateway_rest_api" "visitor_api" {
   name = "VisitorCountAPI"
 }
@@ -143,7 +224,49 @@ resource "aws_api_gateway_deployment" "visitor_deployment" {
   stage_name  = "prod"
 }
 
-# CloudFront Origin Access Control
+# WebSocket API Gateway
+resource "aws_apigatewayv2_api" "websocket_api" {
+  name                       = "VisitorWebSocketAPI"
+  protocol_type              = "WEBSOCKET"
+  route_selection_expression = "$request.body.action"
+}
+
+resource "aws_apigatewayv2_integration" "connect_integration" {
+  api_id                    = aws_apigatewayv2_api.websocket_api.id
+  integration_type          = "AWS_PROXY"
+  integration_uri           = aws_lambda_function.connection_handler.invoke_arn
+  content_handling_strategy = "CONVERT_TO_TEXT"
+  passthrough_behavior      = "WHEN_NO_MATCH"
+}
+
+resource "aws_apigatewayv2_route" "connect_route" {
+  api_id    = aws_apigatewayv2_api.websocket_api.id
+  route_key = "$connect"
+  target    = "integrations/${aws_apigatewayv2_integration.connect_integration.id}"
+}
+
+resource "aws_apigatewayv2_route" "disconnect_route" {
+  api_id    = aws_apigatewayv2_api.websocket_api.id
+  route_key = "$disconnect"
+  target    = "integrations/${aws_apigatewayv2_integration.connect_integration.id}"
+}
+
+resource "aws_apigatewayv2_stage" "websocket_stage" {
+  api_id      = aws_apigatewayv2_api.websocket_api.id
+  name        = "prod"
+  auto_deploy = true
+}
+
+# Lambda Permissions for WebSocket
+resource "aws_lambda_permission" "websocket_connect_permission" {
+  statement_id  = "AllowExecutionFromWebSocketConnect"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.connection_handler.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.websocket_api.execution_arn}/*"
+}
+
+# CloudFront OAC and Distribution
 resource "aws_cloudfront_origin_access_control" "oac" {
   name                              = "s3-oac"
   description                       = "OAC for CloudFront to S3"
@@ -152,7 +275,6 @@ resource "aws_cloudfront_origin_access_control" "oac" {
   signing_protocol                  = "sigv4"
 }
 
-# CloudFront Distribution
 resource "aws_cloudfront_distribution" "website_distribution" {
   origin {
     domain_name              = aws_s3_bucket.website_bucket.bucket_regional_domain_name
@@ -233,6 +355,10 @@ resource "aws_s3_bucket_policy" "allow_cloudfront_access" {
 # Outputs
 output "api_url" {
   value = "${aws_api_gateway_deployment.visitor_deployment.invoke_url}/visitor"
+}
+
+output "websocket_url" {
+  value = aws_apigatewayv2_stage.websocket_stage.invoke_url
 }
 
 output "cloudfront_url" {
